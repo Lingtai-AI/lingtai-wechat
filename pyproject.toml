@@ -6,11 +6,19 @@ build-backend = "hatchling.build"
 name = "lingtai-wechat"
 version = "0.1.0"
 description = "LingTai WeChat MCP server — iLink Bot API client with LICC inbox callback."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Zesen Huang", email = "hzsbazinga@outlook.com" }]
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Lingtai-AI/lingtai-wechat"
+Repository = "https://github.com/Lingtai-AI/lingtai-wechat"
+"LingTai" = "https://lingtai.ai"
 
 [project.scripts]
 lingtai-wechat = "lingtai_wechat.__main__:main"
