@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -13,15 +14,18 @@ from pathlib import Path
 
 from . import api
 
-LOGIN_TIMEOUT = 300  # 5 minutes
+log = logging.getLogger(__name__)
+
+LOGIN_TIMEOUT = 300  # 5 minutes per QR code
 POLL_INTERVAL = 2.0
+MAX_QR_REFRESHES = 3  # auto-refresh expired QR codes up to this many times
 
 
 def cli_login(addon_dir: str) -> None:
     """CLI entry point for WeChat QR login.
 
     Called by the setup skill via:
-        python -c "from lingtai.addons.wechat.login import cli_login; cli_login('.lingtai/.addons/wechat')"
+        python -c "from lingtai_wechat.login import cli_login; cli_login('.secrets')"
 
     Creates config.json with defaults if missing, runs QR login,
     saves credentials.json on success.
@@ -68,65 +72,103 @@ def cli_login(addon_dir: str) -> None:
     print(f"Credentials saved to {creds_path}")
 
 
+def _display_qr(qr_data: dict) -> None:
+    """Display a QR code in the terminal (or print the URL as fallback)."""
+    qrcode_str = qr_data.get("qrcode", "")
+    img_content = qr_data.get("qrcode_img_content", qrcode_str)
+    try:
+        import qrcode as qr_lib
+        qr = qr_lib.QRCode(error_correction=qr_lib.constants.ERROR_CORRECT_L)
+        qr.add_data(img_content)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except ImportError:
+        print(f"QR code URL: {img_content}")
+        print("(Install 'qrcode' package for terminal QR display)")
+
+
 async def _login_flow(base_url: str) -> dict | None:
-    """Run the QR login flow. Returns credentials dict or None on failure."""
-    # Step 1: Get QR code
+    """Run the QR login flow. Returns credentials dict or None on failure.
+
+    Automatically refreshes expired QR codes up to MAX_QR_REFRESHES times,
+    matching the behavior of the official Tencent/openclaw-weixin plugin.
+    """
+    # Step 1: Get initial QR code
     print("Fetching QR code...")
-    qr_data = await api.get_qrcode(base_url)
+    try:
+        qr_data = await api.get_qrcode(base_url)
+    except Exception as e:
+        print(f"Error fetching QR code: {e}")
+        return None
+
     qrcode_str = qr_data.get("qrcode")
     if not qrcode_str:
         print("Error: failed to get QR code from server.")
         return None
 
-    # Step 2: Display QR code in terminal
-    try:
-        import qrcode as qr_lib
-        qr = qr_lib.QRCode(error_correction=qr_lib.constants.ERROR_CORRECT_L)
-        qr.add_data(qr_data.get("qrcode_img_content", qrcode_str))
-        qr.make(fit=True)
-        qr.print_ascii(invert=True)
-    except ImportError:
-        print(f"QR code data: {qrcode_str}")
-        print("(Install 'qrcode' package for visual QR display)")
-
+    # Step 2: Display QR code
+    _display_qr(qr_data)
     print("\nScan this QR code with WeChat on your phone.")
-    print("Waiting for confirmation (5 minute timeout)...")
+    print("Waiting for confirmation...")
 
-    # Step 3: Poll for confirmation
-    start = time.time()
+    # Step 3: Poll for confirmation (with auto-refresh on expiry)
     current_base_url = base_url
-    while time.time() - start < LOGIN_TIMEOUT:
-        try:
-            status = await api.poll_qr_status(current_base_url, qrcode_str)
-        except Exception as e:
-            print(f"Poll error: {e}, retrying...")
+    qr_refresh_count = 0
+    login_start = time.time()
+
+    while True:
+        # Per-QR timeout (5 minutes)
+        qr_start = time.time()
+        while time.time() - qr_start < LOGIN_TIMEOUT:
+            try:
+                status = await api.poll_qr_status(current_base_url, qrcode_str)
+            except Exception as e:
+                log.debug("Poll error: %s, retrying...", e)
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+            s = status.get("status", "")
+            if s == "wait":
+                pass  # Still waiting for scan
+            elif s == "scaned":
+                print("QR code scanned — confirm on your phone...")
+            elif s == "confirmed":
+                return {
+                    "bot_token": status["bot_token"],
+                    "user_id": status.get("ilink_user_id", status.get("ilink_bot_id", "")),
+                    "base_url": status.get("baseurl", current_base_url),
+                }
+            elif s == "expired":
+                break  # Exit inner loop to try refresh
+            elif s == "scaned_but_redirect":
+                redirect_host = status.get("redirect_host", "")
+                if redirect_host:
+                    current_base_url = f"https://{redirect_host}"
+                    print(f"Redirecting to {current_base_url}...")
+                continue
+            else:
+                log.debug("Unknown QR status: %s", s)
+
             await asyncio.sleep(POLL_INTERVAL)
-            continue
 
-        s = status.get("status", "")
-        if s == "wait":
-            pass  # Still waiting for scan
-        elif s == "scaned":
-            print("QR code scanned — confirm on your phone...")
-        elif s == "confirmed":
-            return {
-                "bot_token": status["bot_token"],
-                "user_id": status.get("ilink_user_id", status.get("ilink_bot_id", "")),
-                "base_url": status.get("baseurl", current_base_url),
-            }
-        elif s == "expired":
-            print("QR code expired.")
+        # QR code expired — try to refresh
+        qr_refresh_count += 1
+        if qr_refresh_count > MAX_QR_REFRESHES:
+            print(f"\nQR code expired {MAX_QR_REFRESHES} times. Please try again later.")
             return None
-        elif s == "scaned_but_redirect":
-            redirect_host = status.get("redirect_host", "")
-            if redirect_host:
-                current_base_url = f"https://{redirect_host}"
-                print(f"Redirecting to {current_base_url}...")
-            continue
-        else:
-            print(f"Unknown status: {s}")
 
-        await asyncio.sleep(POLL_INTERVAL)
+        print(f"\n⏳ QR code expired, refreshing... ({qr_refresh_count}/{MAX_QR_REFRESHES})")
+        try:
+            qr_data = await api.get_qrcode(base_url)
+        except Exception as e:
+            print(f"Failed to refresh QR code: {e}")
+            return None
 
-    print("Login timed out (5 minutes).")
-    return None
+        qrcode_str = qr_data.get("qrcode")
+        if not qrcode_str:
+            print("Failed to get new QR code from server.")
+            return None
+
+        current_base_url = base_url  # Reset base URL on refresh
+        _display_qr(qr_data)
+        print("🔄 New QR code generated — please scan again.\n")
