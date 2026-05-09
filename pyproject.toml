@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lingtai-wechat"
 version = "0.1.0"
-description = "LingTai WeChat MCP server — iLink Bot API client with LICC inbox callback."
+description = "LingTai WeChat MCP server"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Zesen Huang", email = "hzsbazinga@outlook.com" }]
