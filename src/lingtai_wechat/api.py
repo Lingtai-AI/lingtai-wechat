@@ -21,12 +21,12 @@ CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_LONG_POLL_TIMEOUT = 35.0
 DEFAULT_SEND_TIMEOUT = 15.0
 
-# Package version for channel_version header
-_PKG_VERSION = "1.0.0"
-
-# iLink App ID — matches the official Tencent/openclaw-weixin plugin.
-# The iLink platform uses this to identify client types.
+# iLink protocol identity. Mirrored from Hermes/OpenClaw adapters.
+# OpenClaw reads channel_version from package.json; Hermes currently uses 2.1.3.
+# ClientVersion is 0x00MMNNPP for 2.1.3 => 131331.
+_PKG_VERSION = "2.1.3"
 _ILINK_APP_ID = "bot"
+_ILINK_APP_CLIENT_VERSION = str((2 << 16) | (1 << 8) | 3)
 
 
 def _ensure_trailing_slash(url: str) -> str:
@@ -53,6 +53,7 @@ def _common_headers() -> dict[str, str]:
     return {
         "X-WECHAT-UIN": _random_wechat_uin(),
         "iLink-App-Id": _ILINK_APP_ID,
+        "iLink-App-ClientVersion": _ILINK_APP_CLIENT_VERSION,
     }
 
 
@@ -186,8 +187,17 @@ async def get_upload_url(
     rawfilemd5: str,
     filesize: int,
     aeskey: str | None = None,
+    filekey: str | None = None,
+    no_need_thumb: bool = True,
 ) -> GetUploadUrlResp:
-    """Get a pre-signed CDN upload URL."""
+    """Get a pre-signed CDN upload URL.
+
+    iLink requires `filekey` (random 16-byte hex string) and `no_need_thumb`
+    in the request body, even though they are not strictly part of the
+    publicly documented schema. Without `filekey` the server may return
+    HTTP 200 with `upload_full_url` omitted, causing the upload to silently
+    fail downstream. Mirrors OpenClaw / Hermes behavior.
+    """
     url = _ensure_trailing_slash(base_url) + "ilink/bot/getuploadurl"
     body: dict[str, Any] = {
         "media_type": media_type,
@@ -195,8 +205,11 @@ async def get_upload_url(
         "rawsize": rawsize,
         "rawfilemd5": rawfilemd5,
         "filesize": filesize,
+        "no_need_thumb": no_need_thumb,
         "base_info": _base_info(),
     }
+    if filekey:
+        body["filekey"] = filekey
     if aeskey:
         body["aeskey"] = aeskey
     async with httpx.AsyncClient() as client:

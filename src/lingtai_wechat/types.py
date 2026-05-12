@@ -46,6 +46,11 @@ class ImageItem:
     thumb_media: CDNMedia | None = None
     aeskey: str | None = None
     url: str | None = None
+    mid_size: int | None = None
+    thumb_size: int | None = None
+    thumb_height: int | None = None
+    thumb_width: int | None = None
+    hd_size: int | None = None
 
 
 @dataclass
@@ -173,6 +178,11 @@ def msg_from_dict(d: dict) -> WeixinMessage:
                 thumb_media=CDNMedia(**img["thumb_media"]) if "thumb_media" in img else None,
                 aeskey=img.get("aeskey"),
                 url=img.get("url"),
+                mid_size=img.get("mid_size"),
+                thumb_size=img.get("thumb_size"),
+                thumb_height=img.get("thumb_height"),
+                thumb_width=img.get("thumb_width"),
+                hd_size=img.get("hd_size"),
             )
         if "voice_item" in raw_item:
             v = raw_item["voice_item"]
@@ -236,9 +246,17 @@ def msg_to_dict(msg: WeixinMessage) -> dict:
                 raw["type"] = item.type
             if item.text_item and item.text_item.text is not None:
                 raw["text_item"] = {"text": item.text_item.text}
-            # Media items are serialized minimally for sends
+            # Image messages require mid_size (ciphertext byte count) for the
+            # WeChat client to render; OpenClaw/Hermes both set it. Other media
+            # types are serialized minimally for sends.
             if item.image_item and item.image_item.media:
-                raw["image_item"] = {"media": _cdn_to_dict(item.image_item.media)}
+                img: dict = {"media": _cdn_to_dict(item.image_item.media)}
+                for fld in ("thumb_media", "aeskey", "url", "mid_size",
+                            "thumb_size", "thumb_height", "thumb_width", "hd_size"):
+                    val = getattr(item.image_item, fld, None)
+                    if val is not None:
+                        img[fld] = _cdn_to_dict(val) if fld == "thumb_media" else val
+                raw["image_item"] = img
             if item.voice_item and item.voice_item.media:
                 raw["voice_item"] = {"media": _cdn_to_dict(item.voice_item.media)}
             if item.file_item and item.file_item.media:

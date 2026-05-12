@@ -22,6 +22,7 @@ from .types import (
 )
 from . import api
 from . import media as media_mod
+from .lockfile import AccountLock, PollerLockBusy
 
 if TYPE_CHECKING:
     pass
@@ -150,11 +151,34 @@ class WechatManager:
         self._poll_thread: threading.Thread | None = None
         self._running = False
 
+        # Per-account poller lock — iLink getUpdates is single-consumer,
+        # so two pollers for the same bot_token race over inbound messages.
+        self._account_lock = AccountLock(token)
+
         # Load persisted state
         self._load_state()
 
     def start(self) -> None:
-        """Start the long-poll loop on a dedicated daemon thread."""
+        """Start the long-poll loop on a dedicated daemon thread.
+
+        Refuses to start if another lingtai-wechat poller already holds the
+        per-account lock on this machine. The caller may catch
+        PollerLockBusy and surface it to the human (server.py logs it and
+        keeps the manager nil, so tool calls return a clear error rather
+        than silently competing with the other poller).
+        """
+        try:
+            self._account_lock.acquire()
+        except PollerLockBusy:
+            # Re-raise after logging — server boot will catch this and
+            # report it through the standard "manager not initialized" path.
+            log.error(
+                "WeChat poller refused to start: another poller already "
+                "holds the lock for this iLink account (%s).",
+                self._account_lock.path,
+            )
+            raise
+
         self._running = True
         self._loop = asyncio.new_event_loop()
         self._poll_thread = threading.Thread(
@@ -172,6 +196,7 @@ class WechatManager:
         if self._poll_thread:
             self._poll_thread.join(timeout=40.0)  # long-poll is 35s
         self._save_state()
+        self._account_lock.release()
         log.info("WeChat addon stopped")
 
     # ── Poll loop ──────────────────────────────────────────────
@@ -225,8 +250,12 @@ class WechatManager:
         """Process an incoming WeChat message."""
         from_user = msg.from_user_id or ""
 
-        # Skip messages from the bot itself (echo prevention)
-        if from_user == self._user_id:
+        # Skip bot-generated echoes. We can't use from_user == self._user_id
+        # here: QR login stores ilink_user_id (the human's id) as
+        # credentials.user_id, so that comparison would discard every real
+        # inbound message. iLink/OpenClaw mark direction via message_type
+        # (1 = USER, 2 = BOT), so filter on that instead.
+        if msg.message_type == 2:
             return
 
         # Filter by allowed_users
@@ -397,7 +426,11 @@ class WechatManager:
             chunks = _chunk_text(text, TEXT_CHUNK_LIMIT)
             for chunk in chunks:
                 msg = WeixinMessage(
+                    from_user_id="",
                     to_user_id=user_id,
+                    client_id=f"lingtai-wechat-{uuid.uuid4().hex}",
+                    message_type=2,   # BOT (matches Hermes/OpenClaw)
+                    message_state=2,  # FINISH
                     context_token=ctx_token,
                     item_list=[MessageItem(
                         type=int(MessageItemType.TEXT),
@@ -417,7 +450,11 @@ class WechatManager:
             )
             media_item = media_mod.make_media_item(cdn_media, path)
             msg = WeixinMessage(
+                from_user_id="",
                 to_user_id=user_id,
+                client_id=f"lingtai-wechat-{uuid.uuid4().hex}",
+                message_type=2,   # BOT
+                message_state=2,  # FINISH
                 context_token=ctx_token,
                 item_list=[media_item],
             )
