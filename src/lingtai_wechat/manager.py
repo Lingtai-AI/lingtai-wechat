@@ -250,12 +250,15 @@ class WechatManager:
         """Process an incoming WeChat message."""
         from_user = msg.from_user_id or ""
 
-        # Skip bot-generated echoes. We can't use from_user == self._user_id
-        # here: QR login stores ilink_user_id (the human's id) as
-        # credentials.user_id, so that comparison would discard every real
-        # inbound message. iLink/OpenClaw mark direction via message_type
-        # (1 = USER, 2 = BOT), so filter on that instead.
-        if msg.message_type == 2:
+        # iLink/OpenClaw mark direction via message_type (1 = USER, 2 = BOT).
+        # We previously used from_user == self._user_id to detect echo, but
+        # QR login stores ilink_user_id (the human's id) into credentials,
+        # so that comparison silently discarded every real inbound message.
+        #
+        # Accept only message_type == 1 (USER). Bot echoes (type=2) and any
+        # other system/control message types are dropped — they have no
+        # body to forward and would surface as empty inbox events.
+        if msg.message_type != 1:
             return
 
         # Filter by allowed_users

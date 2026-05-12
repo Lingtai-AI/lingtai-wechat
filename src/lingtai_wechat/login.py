@@ -19,6 +19,7 @@ credentials are saved.
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import json
 import logging
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import time
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
 from . import api
@@ -113,7 +115,7 @@ def _render_qr_svg(payload: str) -> str | None:
 async def _login_flow(
     base_url: str,
     *,
-    on_new_qr: callable | None = None,  # type: ignore[type-arg]
+    on_new_qr: Callable[[dict], None] | None = None,
 ) -> dict | None:
     """Run the QR login flow. Returns credentials dict or None on failure.
 
@@ -269,25 +271,36 @@ def cli_browser_login(addon_dir: str | None = None) -> None:
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
     base_url = cfg.get("base_url", api.DEFAULT_BASE_URL)
 
-    html_path = Path(tempfile.gettempdir()) / "lingtai_wechat_login.html"
+    # Use a private per-invocation temp dir so concurrent bootstrap runs on
+    # a shared machine cannot collide on /tmp/lingtai_wechat_login.html and
+    # so a symlink-attack vector on a predictable path is not exposed.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="lingtai-wechat-login-"))
+    html_path = tmp_dir / "login.html"
     print(f"QR will be displayed at {html_path}")
 
     def _write_html(qr_data: dict) -> None:
+        # The QR payload is server-controlled text. The SVG content is fully
+        # rendered by qrcode (no payload leakage into the SVG element tree),
+        # but the human-readable payload paragraph must be HTML-escaped or a
+        # malicious/compromised iLink response could inject markup into the
+        # local file:// page.
         payload = qr_data.get("qrcode_img_content") or qr_data.get("qrcode", "")
         svg = _render_qr_svg(payload) or ""
-        html = _BOOTSTRAP_HTML.replace("__QR_SVG__", svg).replace(
-            "__PAYLOAD__", payload,
+        page = _BOOTSTRAP_HTML.replace("__QR_SVG__", svg).replace(
+            "__PAYLOAD__", html.escape(payload),
         )
-        html_path.write_text(html, encoding="utf-8")
+        html_path.write_text(page, encoding="utf-8")
 
     def _on_new_qr(qr_data: dict) -> None:
         _write_html(qr_data)
 
     # Open the (initially empty) page so the browser is already focused
-    # when the first QR is rendered.
+    # when the first QR is rendered. "(loading…)" is a literal — no escape
+    # needed — but keep the discipline of using html.escape so future edits
+    # don't accidentally introduce raw interpolation.
     html_path.write_text(
         _BOOTSTRAP_HTML.replace("__QR_SVG__", "").replace(
-            "__PAYLOAD__", "(loading…)",
+            "__PAYLOAD__", html.escape("(loading…)"),
         ),
         encoding="utf-8",
     )
