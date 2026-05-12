@@ -72,7 +72,7 @@ This prints an ASCII QR directly to the terminal. Scan it with WeChat. On succes
 The server reads two files from the directory pointed at by `LINGTAI_WECHAT_CONFIG`:
 
 - `config.json` — user-controlled options.
-- `credentials.json` — written by `cli_login`. Don't edit by hand.
+- `credentials.json` — written by `lingtai-wechat-bootstrap` (or the `cli_login` fallback). Don't edit by hand.
 
 ### config.json schema
 
@@ -99,7 +99,7 @@ The server reads two files from the directory pointed at by `LINGTAI_WECHAT_CONF
       "command": "/path/to/your/python",
       "args": ["-m", "lingtai_wechat"],
       "env": {
-        "LINGTAI_WECHAT_CONFIG": ".secrets/config.json"
+        "LINGTAI_WECHAT_CONFIG": ".secrets/wechat/config.json"
       }
     }
   }

@@ -258,14 +258,34 @@ def msg_to_dict(msg: WeixinMessage) -> dict:
                         img[fld] = _cdn_to_dict(val) if fld == "thumb_media" else val
                 raw["image_item"] = img
             if item.voice_item and item.voice_item.media:
-                raw["voice_item"] = {"media": _cdn_to_dict(item.voice_item.media)}
+                v: dict = {"media": _cdn_to_dict(item.voice_item.media)}
+                for fld in ("encode_type", "playtime"):
+                    val = getattr(item.voice_item, fld, None)
+                    if val is not None:
+                        v[fld] = val
+                raw["voice_item"] = v
             if item.file_item and item.file_item.media:
-                raw["file_item"] = {
-                    "media": _cdn_to_dict(item.file_item.media),
-                    "file_name": item.file_item.file_name,
-                }
+                # OpenClaw sets file_item.len = str(plaintext size). Without
+                # it, the WeChat client may accept the message but fail to
+                # render or trigger the download dialog.
+                f: dict = {"media": _cdn_to_dict(item.file_item.media)}
+                for fld in ("file_name", "md5", "len"):
+                    val = getattr(item.file_item, fld, None)
+                    if val is not None:
+                        f[fld] = val
+                raw["file_item"] = f
             if item.video_item and item.video_item.media:
-                raw["video_item"] = {"media": _cdn_to_dict(item.video_item.media)}
+                # OpenClaw sets video_item.video_size = ciphertext byte count.
+                # Without it, sendMessage returns ok but the client cannot
+                # render the video preview/playback control.
+                vd: dict = {"media": _cdn_to_dict(item.video_item.media)}
+                for fld in ("video_size", "play_length"):
+                    val = getattr(item.video_item, fld, None)
+                    if val is not None:
+                        vd[fld] = val
+                if item.video_item.thumb_media is not None:
+                    vd["thumb_media"] = _cdn_to_dict(item.video_item.thumb_media)
+                raw["video_item"] = vd
             items.append(raw)
         d["item_list"] = items
 

@@ -354,14 +354,39 @@ def cli_browser_login(addon_dir: str | None = None) -> None:
 
 
 def _bootstrap_main() -> None:
-    """Console-script entry point for ``lingtai-wechat-bootstrap``."""
+    """Console-script entry point for ``lingtai-wechat-bootstrap``.
+
+    Uses argparse so ``-h/--help`` actually prints help instead of being
+    interpreted as the addon-directory positional argument and silently
+    starting the QR login flow.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="lingtai-wechat-bootstrap",
+        description=(
+            "First-time WeChat setup. Generates a QR login page, opens it "
+            "in your default browser, and writes credentials.json on success. "
+            "Falls back to a terminal QR if the browser cannot be opened."
+        ),
+    )
+    parser.add_argument(
+        "addon_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Directory to write config.json + credentials.json into "
+            "(default: prompt interactively; suggested ``.secrets/wechat``)."
+        ),
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stderr,
     )
-    arg = sys.argv[1] if len(sys.argv) > 1 else None
-    cli_browser_login(arg)
+    cli_browser_login(args.addon_dir)
 
 
 # Static HTML template for the browser bootstrap page. Self-contained;

@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,24 @@ from .types import (
     CDNMedia, UploadMediaType, MessageItemType,
     ImageItem, VoiceItem, FileItem, VideoItem, MessageItem,
 )
+
+
+@dataclass
+class UploadedMediaInfo:
+    """The full result of a CDN upload, carrying everything sendMessage needs.
+
+    `upload_media` returns this so non-image media (video, file) can populate
+    their type-specific size fields — OpenClaw sets `video_item.video_size` to
+    the ciphertext byte count and `file_item.len` to the plaintext byte count,
+    in addition to `image_item.mid_size`. Without those, the WeChat client may
+    accept the message but fail to render or download the attachment.
+    """
+
+    cdn_media: CDNMedia
+    media_type: UploadMediaType
+    raw_size: int          # plaintext byte count
+    ciphertext_size: int   # AES-128-ECB + PKCS#7 byte count
+    filekey: str
 
 log = logging.getLogger(__name__)
 
@@ -115,8 +134,12 @@ async def upload_media(
     base_url: str,
     token: str,
     to_user_id: str,
-) -> CDNMedia:
-    """Upload a file to WeChat CDN. Returns CDNMedia reference for sendMessage.
+) -> UploadedMediaInfo:
+    """Upload a file to WeChat CDN.
+
+    Returns an UploadedMediaInfo carrying the CDNMedia reference plus the
+    raw/ciphertext sizes and filekey that non-image media (video, file)
+    need to populate their type-specific size fields downstream.
 
     Mirrors Hermes/OpenClaw: iLink expects getuploadurl to receive raw size,
     raw MD5, AES key, and padded ciphertext size; the CDN upload body is
@@ -125,6 +148,15 @@ async def upload_media(
     encrypt_type=1. Earlier versions of this addon used plaintext PUT, which
     iLink would accept (HTTP 200) but produce an image the WeChat client
     could not decrypt/open.
+
+    The final download parameter MUST come from the CDN's `x-encrypted-param`
+    response header (or, as a documented fallback, a JSON body containing
+    `encrypt_query_param` / `download_param`). Falling back to the
+    pre-upload `upload_param` or to the locally-generated `filekey` would
+    silently recreate the prior "sendMessage returns ok but WeChat client
+    can't open the image" false-positive — those values are NOT the
+    download parameter and the WeChat client cannot decrypt the payload
+    with them. So we raise instead.
     """
     file_path = Path(file_path)
     if not file_path.is_file():
@@ -159,8 +191,7 @@ async def upload_media(
 
     # Upload encrypted bytes to CDN. OpenClaw uses POST (not PUT) and reads
     # the final download encrypted_query_param from the x-encrypted-param
-    # response header. Some CDN responses also embed it in a JSON body as a
-    # fallback.
+    # response header. Some CDN responses also embed it in a JSON body.
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             upload_url,
@@ -171,24 +202,30 @@ async def upload_media(
         resp.raise_for_status()
         raw = resp.text
 
-    download_param = (
-        resp.headers.get("x-encrypted-param")
-        or upload_resp.upload_param
-        or filekey
-    )
-    try:
-        if raw and raw.strip().startswith("{"):
+    header_param = resp.headers.get("x-encrypted-param")
+    json_param: str | None = None
+    if raw and raw.strip().startswith("{"):
+        try:
             body = resp.json()
-            download_param = (
-                resp.headers.get("x-encrypted-param")
-                or body.get("encrypt_query_param")
+            json_param = (
+                body.get("encrypt_query_param")
                 or body.get("download_param")
-                or download_param
             )
-    except Exception:
-        pass
+        except Exception:
+            json_param = None
 
-    return CDNMedia(
+    download_param = header_param or json_param
+    if not download_param:
+        # Be strict here. The prior code fell back to upload_param/filekey,
+        # which made the function appear to succeed while producing media
+        # the WeChat client could not open. Better to raise loudly.
+        raise RuntimeError(
+            "CDN upload response missing x-encrypted-param header and "
+            "encrypt_query_param / download_param JSON field. The upload "
+            "may have failed silently — refusing to return media reference."
+        )
+
+    cdn_media = CDNMedia(
         encrypt_query_param=download_param,
         # OpenClaw sends media.aes_key as base64(32-char hex string), not
         # base64(raw 16 bytes). The WeChat client decrypts the CDN payload
@@ -197,26 +234,49 @@ async def upload_media(
         aes_key=base64.b64encode(aeskey_hex.encode("ascii")).decode("ascii"),
         encrypt_type=1,
     )
+    return UploadedMediaInfo(
+        cdn_media=cdn_media,
+        media_type=media_type,
+        raw_size=len(data),
+        ciphertext_size=len(ciphertext),
+        filekey=filekey,
+    )
 
 
-def make_media_item(cdn_media: CDNMedia, file_path: Path) -> MessageItem:
-    """Create a MessageItem for sending uploaded media."""
-    upload_type = detect_upload_type(file_path)
-    item_type = _ITEM_TYPE_MAP.get(upload_type, MessageItemType.FILE)
+def make_media_item(info: UploadedMediaInfo, file_path: Path) -> MessageItem:
+    """Create a MessageItem for sending uploaded media.
 
+    For each media type, sets the OpenClaw/Hermes size fields that the
+    WeChat client requires to render/download the attachment:
+
+    - image: ``image_item.mid_size = ciphertext byte count``
+    - video: ``video_item.video_size = ciphertext byte count``
+    - file:  ``file_item.len = str(plaintext byte count)``
+    - voice: no extra size field documented in OpenClaw outbound; the
+      iLink schema does include ``playtime`` and ``encode_type`` if you
+      have them, but outbound voice send is not part of the validated
+      path. The MessageItem still carries the encrypted CDN reference,
+      so a downstream client with looser validation may render it.
+    """
+    item_type = _ITEM_TYPE_MAP.get(info.media_type, MessageItemType.FILE)
     item = MessageItem(type=int(item_type))
     if item_type == MessageItemType.IMAGE:
-        # OpenClaw/Hermes set mid_size = ciphertext byte count. Without it,
-        # sendMessage returns ok but the WeChat client fails to display.
         item.image_item = ImageItem(
-            media=cdn_media,
-            mid_size=_encrypted_size(file_path.stat().st_size),
+            media=info.cdn_media,
+            mid_size=info.ciphertext_size,
         )
     elif item_type == MessageItemType.VIDEO:
-        item.video_item = VideoItem(media=cdn_media)
+        item.video_item = VideoItem(
+            media=info.cdn_media,
+            video_size=info.ciphertext_size,
+        )
     elif item_type == MessageItemType.VOICE:
-        item.voice_item = VoiceItem(media=cdn_media)
+        item.voice_item = VoiceItem(media=info.cdn_media)
     else:
-        item.file_item = FileItem(media=cdn_media, file_name=file_path.name)
+        item.file_item = FileItem(
+            media=info.cdn_media,
+            file_name=file_path.name,
+            len=str(info.raw_size),
+        )
 
     return item

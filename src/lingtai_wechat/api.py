@@ -161,7 +161,16 @@ async def send_message(
     token: str,
     msg: WeixinMessage,
 ) -> None:
-    """Send a message (text or media)."""
+    """Send a message (text or media).
+
+    iLink occasionally returns HTTP 200 with a JSON body whose ``ret`` or
+    ``errcode`` indicates a logical failure (e.g. session expired,
+    rate-limited, malformed payload, target user blocked). The previous
+    implementation accepted any 2xx and silently let those reports bubble
+    up as success. Now we parse the body when it's JSON and raise on
+    obvious error fields so the caller can react instead of pretending
+    the send went through.
+    """
     url = _ensure_trailing_slash(base_url) + "ilink/bot/sendmessage"
     body = {
         "msg": msg_to_dict(msg),
@@ -175,6 +184,31 @@ async def send_message(
             timeout=DEFAULT_SEND_TIMEOUT,
         )
         resp.raise_for_status()
+        _raise_on_ilink_error(resp, "send_message")
+
+
+def _raise_on_ilink_error(resp: "httpx.Response", op: str) -> None:
+    """Raise if an iLink JSON response carries a non-zero ret/errcode.
+
+    HTTP 200 with ``ret != 0`` or ``errcode != 0`` is iLink's documented
+    way to report logical errors while keeping the transport layer happy.
+    Tolerant of non-JSON bodies — many CDN responses are plain text.
+    """
+    raw = resp.text
+    if not raw or not raw.strip().startswith("{"):
+        return
+    try:
+        body = resp.json()
+    except Exception:
+        return
+    ret = body.get("ret")
+    errcode = body.get("errcode")
+    errmsg = body.get("errmsg")
+    if (ret is not None and ret != 0) or (errcode is not None and errcode != 0):
+        raise RuntimeError(
+            f"iLink {op} reported logical error: "
+            f"ret={ret} errcode={errcode} errmsg={errmsg!r}"
+        )
 
 
 async def get_upload_url(

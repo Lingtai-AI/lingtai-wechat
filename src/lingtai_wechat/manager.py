@@ -448,10 +448,10 @@ class WechatManager:
         # Send media (already validated above)
         if media_path:
             path = Path(media_path)
-            cdn_media = self._run_async(
+            upload_info = self._run_async(
                 media_mod.upload_media(path, self._base_url, self._token, user_id)
             )
-            media_item = media_mod.make_media_item(cdn_media, path)
+            media_item = media_mod.make_media_item(upload_info, path)
             msg = WeixinMessage(
                 from_user_id="",
                 to_user_id=user_id,
