@@ -95,11 +95,40 @@ class AccountLock:
         except BlockingIOError as exc:
             existing_pid = _read_existing_pid_fh(fh)
             fh.close()
+            pid_str = existing_pid or "unknown"
+            # Concrete remediation hints — after an upgrade, the most common
+            # reason this fires is that another LingTai project still has
+            # its old lingtai-wechat MCP running and we can't tell the user
+            # which project it belongs to from this side of the lock.
+            remediation: list[str] = []
+            if existing_pid and existing_pid.isdigit():
+                remediation.append(
+                    f"  Inspect the holder:  ps -p {existing_pid} -o pid,command"
+                )
+                remediation.append(
+                    f"  Find its workdir:    lsof -p {existing_pid} 2>/dev/null | grep cwd"
+                )
+                remediation.append(
+                    f"  Stop it gracefully:  kill -TERM {existing_pid}"
+                )
+            else:
+                remediation.append(
+                    "  Find pollers:   pgrep -af 'python.*lingtai_wechat'"
+                )
+                remediation.append(
+                    "  Lockfile is held but no PID recorded — most likely a "
+                    "pre-upgrade poller that predates the lockfile. Stop it "
+                    "from the project that launched it."
+                )
             raise PollerLockBusy(
                 f"Another lingtai-wechat poller is already running for this "
-                f"iLink account (lockfile: {self._path}, "
-                f"holder PID: {existing_pid or 'unknown'}). "
-                f"Stop the other poller before starting this one."
+                f"iLink account.\n"
+                f"  Lockfile:    {self._path}\n"
+                f"  Holder PID:  {pid_str}\n"
+                f"Stop the other poller before starting this one:\n"
+                + "\n".join(remediation)
+                + "\n(See lingtai-wechat README → Troubleshooting → "
+                "\"multiple pollers after upgrade\".)"
             ) from exc
 
         # Only write the PID *after* the lock is acquired, so contenders

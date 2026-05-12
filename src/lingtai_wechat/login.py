@@ -227,6 +227,8 @@ def cli_login(addon_dir: str) -> None:
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
     base_url = cfg.get("base_url", api.DEFAULT_BASE_URL)
 
+    _print_admin_qr_warning()
+
     try:
         result = asyncio.run(_login_flow(base_url))
     except KeyboardInterrupt:
@@ -240,6 +242,22 @@ def cli_login(addon_dir: str) -> None:
     creds_path = _save_credentials(config_path.parent, result)
     print(f"Connected as {result['user_id']}")
     print(f"Credentials saved to {creds_path}")
+
+
+def _print_admin_qr_warning() -> None:
+    """Print a stderr-equivalent warning about login-QR vs contact-QR mixup.
+
+    Goes to stdout so it appears inline with the QR in the terminal. See
+    GH #87: the iLink login QR authorizes the scanner's WeChat account as
+    the backend; it is NOT a public chat QR to share with users.
+    """
+    print()
+    print("  ⚠  Admin login QR — do NOT share")
+    print("     Scanning this QR logs a WeChat account in as the bot's")
+    print("     backend identity. If a friend scans it, their account")
+    print("     replaces yours. This is not a contact/group/customer-")
+    print("     service QR — share those from inside WeChat after login.")
+    print()
 
 
 def cli_browser_login(addon_dir: str | None = None) -> None:
@@ -277,6 +295,7 @@ def cli_browser_login(addon_dir: str | None = None) -> None:
     tmp_dir = Path(tempfile.mkdtemp(prefix="lingtai-wechat-login-"))
     html_path = tmp_dir / "login.html"
     print(f"QR will be displayed at {html_path}")
+    _print_admin_qr_warning()
 
     def _write_html(qr_data: dict) -> None:
         # The QR payload is server-controlled text. The SVG content is fully
@@ -347,11 +366,17 @@ def _bootstrap_main() -> None:
 
 # Static HTML template for the browser bootstrap page. Self-contained;
 # no external assets and no JavaScript — the human just scans the QR.
+#
+# The page is intentionally framed as an *admin* login: this QR authorizes
+# a WeChat account as the backend identity. Sharing it with a "friend who
+# wants to try the bot" would log THEIR account in as the bot and either
+# disrupt or steal the working credentials (see GH #87). The bold red
+# banner and the secondary block at the bottom both call this out.
 _BOOTSTRAP_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>LingTai — WeChat login</title>
+<title>LingTai — WeChat admin login QR (do not share)</title>
 <meta http-equiv="refresh" content="3">
 <style>
   :root {
@@ -359,9 +384,17 @@ _BOOTSTRAP_HTML = """<!doctype html>
     --fg: #1a1a1a;
     --bg: #fafafa;
     --accent: #b07a3a;
+    --warn-fg: #8a1a1a;
+    --warn-bg: #fce8e6;
+    --warn-border: #d04040;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --fg: #eee; --bg: #181818; }
+    :root {
+      --fg: #eee; --bg: #181818;
+      --warn-fg: #ffb3a8;
+      --warn-bg: #3a1a1a;
+      --warn-border: #c45050;
+    }
   }
   body {
     margin: 0;
@@ -372,8 +405,8 @@ _BOOTSTRAP_HTML = """<!doctype html>
     display: flex; align-items: center; justify-content: center;
   }
   .card {
-    max-width: 480px;
-    padding: 2.5em 2em;
+    max-width: 520px;
+    padding: 2.2em 2em;
     text-align: center;
   }
   h1 { font-size: 1.4em; margin: 0 0 .3em; }
@@ -384,12 +417,39 @@ _BOOTSTRAP_HTML = """<!doctype html>
   .payload { font-family: monospace; font-size: .8em;
              color: var(--accent); word-break: break-all; }
   .hint { opacity: .75; font-size: .9em; }
+  .warn {
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    border: 1px solid var(--warn-border);
+    border-radius: 8px;
+    padding: .9em 1em;
+    margin: 0 0 1.2em;
+    font-size: .95em;
+    text-align: left;
+  }
+  .warn strong { display: block; margin-bottom: .25em; font-size: 1em; }
+  .footnote {
+    border-top: 1px solid var(--warn-border);
+    margin-top: 1.4em;
+    padding-top: .9em;
+    font-size: .82em;
+    opacity: .85;
+    text-align: left;
+  }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1>LingTai — WeChat login</h1>
-    <p>Open WeChat on your phone, tap the scan button, and scan the QR below.</p>
+    <div class="warn" role="alert">
+      <strong>⚠ Admin login QR — do not share</strong>
+      Scanning this QR <em>authorizes a WeChat account as the bot's backend
+      identity</em>. If a friend or end user scans it, their account will be
+      bound instead, replacing your credentials. This is not a contact /
+      group / customer-service QR.
+    </div>
+    <h1>LingTai — WeChat admin login</h1>
+    <p>Open WeChat on <em>your own</em> phone, tap the scan button, and scan
+       the QR below to log this account in as the bot backend.</p>
     <div class="qr">__QR_SVG__</div>
     <p class="payload">__PAYLOAD__</p>
     <p class="hint">
@@ -397,6 +457,12 @@ _BOOTSTRAP_HTML = """<!doctype html>
       phone, the terminal that launched the bootstrap will save your
       credentials and you can close this tab.
     </p>
+    <div class="footnote">
+      <strong>Want a friend to chat with the bot?</strong>
+      Don't share this QR. After login, share the logged-in WeChat account's
+      normal contact / group / customer-service QR from inside WeChat — that
+      is the public entrypoint for users. This page is admin-only.
+    </div>
   </div>
 </body>
 </html>
