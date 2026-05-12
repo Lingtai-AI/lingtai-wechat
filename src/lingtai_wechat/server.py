@@ -8,7 +8,9 @@ the host agent's inbox via LICC.
 Configuration:
     LINGTAI_WECHAT_CONFIG  — path to ``config.json``. ``credentials.json``
                              is read from the same directory and is written
-                             by the ``cli_login`` flow (see README).
+                             by the ``lingtai-wechat-bootstrap`` flow
+                             (recommended) or the headless ``cli_login``
+                             fallback. See README.
 
 Config schemas (plaintext, no env-indirection):
 
@@ -19,7 +21,7 @@ Config schemas (plaintext, no env-indirection):
           "allowed_users": ["wxid_..."]  // optional allow-list
         }
 
-    credentials.json (written by cli_login):
+    credentials.json (written by lingtai-wechat-bootstrap or cli_login):
         {
           "bot_token": "...",
           "user_id": "wxid_...",
@@ -86,8 +88,10 @@ def load_config_and_credentials() -> tuple[dict, dict, Path]:
     if not creds_path.is_file():
         raise FileNotFoundError(
             f"WeChat credentials not found: {creds_path}. "
-            "Run the login command first to authenticate via QR code: "
-            f'python -c "from lingtai_wechat.login import cli_login; '
+            f"Run the bootstrap flow first to authenticate via QR code:\n"
+            f"  lingtai-wechat-bootstrap {config_path.parent}\n"
+            f"or, for a headless host:\n"
+            f'  python -c "from lingtai_wechat.login import cli_login; '
             f"cli_login('{config_path.parent}')\""
         )
     creds = json.loads(creds_path.read_text(encoding="utf-8"))
@@ -148,7 +152,12 @@ def build_manager() -> tuple[WechatManager, Path]:
 # MCP server
 # ---------------------------------------------------------------------------
 
-def build_server(manager: WechatManager | None) -> Server:
+def build_server(
+    manager: WechatManager | None,
+    *,
+    startup_error: str | None = None,
+    startup_error_type: str | None = None,
+) -> Server:
     server: Server = Server("lingtai-wechat", instructions=_SERVER_INSTRUCTIONS)
 
     @server.list_tools()
@@ -168,13 +177,20 @@ def build_server(manager: WechatManager | None) -> Server:
         if name != "wechat":
             raise ValueError(f"unknown tool: {name!r}")
         if manager is None:
+            # Surface the actual startup exception type + message so the
+            # agent/operator sees concrete remediation (e.g. PollerLockBusy
+            # with ps/kill hints) instead of just "check stderr". stderr is
+            # not always visible at the moment a tool call returns.
             result = {
                 "status": "error",
                 "error": (
                     "WeChat manager not initialized — server boot failed. "
-                    "Check stderr for the underlying exception (most often "
-                    "missing config or credentials; run cli_login first)."
+                    "Run lingtai-wechat-bootstrap first if you haven't set "
+                    "up credentials, or check the startup_error fields "
+                    "below for the underlying exception."
                 ),
+                "startup_error_type": startup_error_type,
+                "startup_error": startup_error,
             }
         else:
             try:
@@ -201,6 +217,8 @@ async def serve() -> None:
     so inbound messages flow before the host expects them."""
     manager: WechatManager | None = None
     started = False
+    startup_error: str | None = None
+    startup_error_type: str | None = None
     try:
         manager, _wd = build_manager()
         manager.start()
@@ -211,8 +229,14 @@ async def serve() -> None:
             "eager start failed; tool calls will return errors until fixed: %s", e,
         )
         manager = None
+        startup_error = str(e)
+        startup_error_type = type(e).__name__
 
-    server = build_server(manager)
+    server = build_server(
+        manager,
+        startup_error=startup_error,
+        startup_error_type=startup_error_type,
+    )
     try:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

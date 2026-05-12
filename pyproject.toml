@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lingtai-wechat"
-version = "0.1.0"
+version = "0.1.2"
 description = "LingTai WeChat MCP server"
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,6 +13,10 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27.0",
+    # AES-128-ECB encryption of CDN media payloads (iLink protocol)
+    "cryptography>=42.0.0",
+    # Terminal/HTML QR display for the browser bootstrap login flow
+    "qrcode>=7.4.0",
 ]
 
 [project.urls]
@@ -22,6 +26,7 @@ Repository = "https://github.com/Lingtai-AI/lingtai-wechat"
 
 [project.scripts]
 lingtai-wechat = "lingtai_wechat.__main__:main"
+lingtai-wechat-bootstrap = "lingtai_wechat.login:_bootstrap_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lingtai_wechat"]

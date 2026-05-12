@@ -46,6 +46,11 @@ class ImageItem:
     thumb_media: CDNMedia | None = None
     aeskey: str | None = None
     url: str | None = None
+    mid_size: int | None = None
+    thumb_size: int | None = None
+    thumb_height: int | None = None
+    thumb_width: int | None = None
+    hd_size: int | None = None
 
 
 @dataclass
@@ -173,6 +178,11 @@ def msg_from_dict(d: dict) -> WeixinMessage:
                 thumb_media=CDNMedia(**img["thumb_media"]) if "thumb_media" in img else None,
                 aeskey=img.get("aeskey"),
                 url=img.get("url"),
+                mid_size=img.get("mid_size"),
+                thumb_size=img.get("thumb_size"),
+                thumb_height=img.get("thumb_height"),
+                thumb_width=img.get("thumb_width"),
+                hd_size=img.get("hd_size"),
             )
         if "voice_item" in raw_item:
             v = raw_item["voice_item"]
@@ -236,18 +246,46 @@ def msg_to_dict(msg: WeixinMessage) -> dict:
                 raw["type"] = item.type
             if item.text_item and item.text_item.text is not None:
                 raw["text_item"] = {"text": item.text_item.text}
-            # Media items are serialized minimally for sends
+            # Image messages require mid_size (ciphertext byte count) for the
+            # WeChat client to render; OpenClaw/Hermes both set it. Other media
+            # types are serialized minimally for sends.
             if item.image_item and item.image_item.media:
-                raw["image_item"] = {"media": _cdn_to_dict(item.image_item.media)}
+                img: dict = {"media": _cdn_to_dict(item.image_item.media)}
+                for fld in ("thumb_media", "aeskey", "url", "mid_size",
+                            "thumb_size", "thumb_height", "thumb_width", "hd_size"):
+                    val = getattr(item.image_item, fld, None)
+                    if val is not None:
+                        img[fld] = _cdn_to_dict(val) if fld == "thumb_media" else val
+                raw["image_item"] = img
             if item.voice_item and item.voice_item.media:
-                raw["voice_item"] = {"media": _cdn_to_dict(item.voice_item.media)}
+                v: dict = {"media": _cdn_to_dict(item.voice_item.media)}
+                for fld in ("encode_type", "playtime"):
+                    val = getattr(item.voice_item, fld, None)
+                    if val is not None:
+                        v[fld] = val
+                raw["voice_item"] = v
             if item.file_item and item.file_item.media:
-                raw["file_item"] = {
-                    "media": _cdn_to_dict(item.file_item.media),
-                    "file_name": item.file_item.file_name,
-                }
+                # OpenClaw sets file_item.len = str(plaintext size). Without
+                # it, the WeChat client may accept the message but fail to
+                # render or trigger the download dialog.
+                f: dict = {"media": _cdn_to_dict(item.file_item.media)}
+                for fld in ("file_name", "md5", "len"):
+                    val = getattr(item.file_item, fld, None)
+                    if val is not None:
+                        f[fld] = val
+                raw["file_item"] = f
             if item.video_item and item.video_item.media:
-                raw["video_item"] = {"media": _cdn_to_dict(item.video_item.media)}
+                # OpenClaw sets video_item.video_size = ciphertext byte count.
+                # Without it, sendMessage returns ok but the client cannot
+                # render the video preview/playback control.
+                vd: dict = {"media": _cdn_to_dict(item.video_item.media)}
+                for fld in ("video_size", "play_length"):
+                    val = getattr(item.video_item, fld, None)
+                    if val is not None:
+                        vd[fld] = val
+                if item.video_item.thumb_media is not None:
+                    vd["thumb_media"] = _cdn_to_dict(item.video_item.thumb_media)
+                raw["video_item"] = vd
             items.append(raw)
         d["item_list"] = items
 

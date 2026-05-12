@@ -34,22 +34,45 @@ After install, `python -m lingtai_wechat` (or the `lingtai-wechat` script) start
 
 ## QR-code login (one-time, before first use)
 
-WeChat doesn't issue static bot tokens. Authenticate by scanning a QR code with the WeChat mobile app. From a shell on your agent's machine:
+WeChat doesn't issue static bot tokens. Authenticate by scanning a QR code with the WeChat mobile app.
+
+> ⚠ **The login QR is admin-only — do not share it.** Scanning it logs a WeChat account in as the bot's backend identity. If a friend or end user scans it instead of you, their account binds in place of yours and your credentials are replaced. This is **not** a contact / group / customer-service QR — those are shared from inside WeChat *after* login, and are how users actually chat with the bot.
+
+### Recommended: browser bootstrap
 
 ```bash
-python -c "from lingtai_wechat.login import cli_login; cli_login('.secrets')"
+lingtai-wechat-bootstrap .secrets/wechat
 ```
 
-This prints a QR code in the terminal (or saves a PNG, depending on your OS). Scan it with WeChat. On success, `credentials.json` is written into the directory you passed (`.secrets` in this example), containing `bot_token`, `user_id`, and `base_url`.
+This is the preferred first-time setup. It:
 
-Sessions expire periodically (typically ~30 days). When expired, you'll see a LICC event with `metadata.event_type: "session_expired"` — re-run the login command.
+1. Creates `.secrets/wechat/config.json` with defaults if missing.
+2. Renders the QR as an SVG inside a self-contained HTML page (with an admin-only warning banner) and opens it in your default browser.
+3. Polls iLink for confirmation, auto-refreshing the QR if it expires.
+4. Writes `credentials.json` (chmod 600) and tells you to refresh the MCP.
+
+The page auto-refreshes every 3s and prints a clear admin-only warning so the scanner cannot mistake it for a chat QR.
+
+### Headless fallback: terminal QR
+
+If the host has no browser or you're connecting over SSH without X-forwarding:
+
+```bash
+python -c "from lingtai_wechat.login import cli_login; cli_login('.secrets/wechat')"
+```
+
+This prints an ASCII QR directly to the terminal. Scan it with WeChat. On success, `credentials.json` is written into the directory you passed.
+
+### After login
+
+`credentials.json` contains `bot_token`, `user_id`, and `base_url`. Sessions expire periodically (typically ~30 days). When expired, you'll see a LICC event with `metadata.event_type: "session_expired"` — re-run the bootstrap.
 
 ## Configure
 
 The server reads two files from the directory pointed at by `LINGTAI_WECHAT_CONFIG`:
 
 - `config.json` — user-controlled options.
-- `credentials.json` — written by `cli_login`. Don't edit by hand.
+- `credentials.json` — written by `lingtai-wechat-bootstrap` (or the `cli_login` fallback). Don't edit by hand.
 
 ### config.json schema
 
@@ -76,7 +99,7 @@ The server reads two files from the directory pointed at by `LINGTAI_WECHAT_CONF
       "command": "/path/to/your/python",
       "args": ["-m", "lingtai_wechat"],
       "env": {
-        "LINGTAI_WECHAT_CONFIG": ".secrets/config.json"
+        "LINGTAI_WECHAT_CONFIG": ".secrets/wechat/config.json"
       }
     }
   }
@@ -94,6 +117,30 @@ Then run `system(action="refresh")` from the agent. The MCP subprocess starts, t
 - **`All connection attempts failed`** in stderr — usually a stale `base_url` in credentials. Re-run login.
 - **MCP server failed to start** — usually the `command` path in `init.json` doesn't have `lingtai_wechat` installed. Confirm with `<command> -m lingtai_wechat --help` from a shell.
 - **Tool calls return `WeChat manager not initialized`** — server boot failed (missing config or expired creds). Check stderr.
+
+### Multiple pollers after upgrading
+
+iLink's `getUpdates` is a single-consumer long-poll: two processes holding the same `bot_token` race over inbound messages and each one gets a different subset. To prevent this, every `lingtai-wechat` poller takes an exclusive `fcntl.flock` on `~/.lingtai-wechat/locks/poller-<sha256(bot_token)[:16]>.lock` at startup. If a second poller starts for the same account, it refuses with a `PollerLockBusy` error that includes the holder's PID.
+
+After upgrading to a `lingtai-wechat` version with the lock, the new process may refuse to start because a pre-upgrade poller from another LingTai project is still running. Diagnose and stop it:
+
+```bash
+# 1. Find every lingtai_wechat poller currently running.
+pgrep -af 'python.*lingtai_wechat'
+
+# 2. The PollerLockBusy error names the holder PID. Inspect it:
+ps -p <pid> -o pid,command
+lsof -p <pid> 2>/dev/null | grep cwd   # which working dir launched it
+
+# 3. Stop the old poller (refresh that project's MCP after).
+kill -TERM <pid>
+```
+
+Notes:
+
+- Lockfiles in `~/.lingtai-wechat/locks/` are intentionally left on disk after process exit — the `flock` kernel state is what's authoritative, not the file's presence. A leftover lockfile from a dead process is harmless; a new poller will reacquire the lock cleanly.
+- The lock is keyed on `sha256(bot_token)`, so two accounts produce different lockfiles and don't conflict. Multiple LingTai projects sharing one account is the case the lock prevents.
+- On Windows, `fcntl` is unavailable; `lingtai-wechat` will refuse to start with `UnsupportedPlatformError` rather than silently re-introducing the race.
 
 ## License
 

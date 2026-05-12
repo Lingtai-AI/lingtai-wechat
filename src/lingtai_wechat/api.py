@@ -21,12 +21,12 @@ CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_LONG_POLL_TIMEOUT = 35.0
 DEFAULT_SEND_TIMEOUT = 15.0
 
-# Package version for channel_version header
-_PKG_VERSION = "1.0.0"
-
-# iLink App ID — matches the official Tencent/openclaw-weixin plugin.
-# The iLink platform uses this to identify client types.
+# iLink protocol identity. Mirrored from Hermes/OpenClaw adapters.
+# OpenClaw reads channel_version from package.json; Hermes currently uses 2.1.3.
+# ClientVersion is 0x00MMNNPP for 2.1.3 => 131331.
+_PKG_VERSION = "2.1.3"
 _ILINK_APP_ID = "bot"
+_ILINK_APP_CLIENT_VERSION = str((2 << 16) | (1 << 8) | 3)
 
 
 def _ensure_trailing_slash(url: str) -> str:
@@ -53,6 +53,7 @@ def _common_headers() -> dict[str, str]:
     return {
         "X-WECHAT-UIN": _random_wechat_uin(),
         "iLink-App-Id": _ILINK_APP_ID,
+        "iLink-App-ClientVersion": _ILINK_APP_CLIENT_VERSION,
     }
 
 
@@ -160,7 +161,16 @@ async def send_message(
     token: str,
     msg: WeixinMessage,
 ) -> None:
-    """Send a message (text or media)."""
+    """Send a message (text or media).
+
+    iLink occasionally returns HTTP 200 with a JSON body whose ``ret`` or
+    ``errcode`` indicates a logical failure (e.g. session expired,
+    rate-limited, malformed payload, target user blocked). The previous
+    implementation accepted any 2xx and silently let those reports bubble
+    up as success. Now we parse the body when it's JSON and raise on
+    obvious error fields so the caller can react instead of pretending
+    the send went through.
+    """
     url = _ensure_trailing_slash(base_url) + "ilink/bot/sendmessage"
     body = {
         "msg": msg_to_dict(msg),
@@ -174,6 +184,31 @@ async def send_message(
             timeout=DEFAULT_SEND_TIMEOUT,
         )
         resp.raise_for_status()
+        _raise_on_ilink_error(resp, "send_message")
+
+
+def _raise_on_ilink_error(resp: "httpx.Response", op: str) -> None:
+    """Raise if an iLink JSON response carries a non-zero ret/errcode.
+
+    HTTP 200 with ``ret != 0`` or ``errcode != 0`` is iLink's documented
+    way to report logical errors while keeping the transport layer happy.
+    Tolerant of non-JSON bodies — many CDN responses are plain text.
+    """
+    raw = resp.text
+    if not raw or not raw.strip().startswith("{"):
+        return
+    try:
+        body = resp.json()
+    except Exception:
+        return
+    ret = body.get("ret")
+    errcode = body.get("errcode")
+    errmsg = body.get("errmsg")
+    if (ret is not None and ret != 0) or (errcode is not None and errcode != 0):
+        raise RuntimeError(
+            f"iLink {op} reported logical error: "
+            f"ret={ret} errcode={errcode} errmsg={errmsg!r}"
+        )
 
 
 async def get_upload_url(
@@ -186,8 +221,17 @@ async def get_upload_url(
     rawfilemd5: str,
     filesize: int,
     aeskey: str | None = None,
+    filekey: str | None = None,
+    no_need_thumb: bool = True,
 ) -> GetUploadUrlResp:
-    """Get a pre-signed CDN upload URL."""
+    """Get a pre-signed CDN upload URL.
+
+    iLink requires `filekey` (random 16-byte hex string) and `no_need_thumb`
+    in the request body, even though they are not strictly part of the
+    publicly documented schema. Without `filekey` the server may return
+    HTTP 200 with `upload_full_url` omitted, causing the upload to silently
+    fail downstream. Mirrors OpenClaw / Hermes behavior.
+    """
     url = _ensure_trailing_slash(base_url) + "ilink/bot/getuploadurl"
     body: dict[str, Any] = {
         "media_type": media_type,
@@ -195,8 +239,11 @@ async def get_upload_url(
         "rawsize": rawsize,
         "rawfilemd5": rawfilemd5,
         "filesize": filesize,
+        "no_need_thumb": no_need_thumb,
         "base_info": _base_info(),
     }
+    if filekey:
+        body["filekey"] = filekey
     if aeskey:
         body["aeskey"] = aeskey
     async with httpx.AsyncClient() as client:
