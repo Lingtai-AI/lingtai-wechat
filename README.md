@@ -41,10 +41,14 @@ WeChat doesn't issue static bot tokens. Authenticate by scanning a QR code with 
 ### Recommended: browser bootstrap
 
 ```bash
+# If installed into LingTai's runtime venv (typical):
+~/.lingtai-tui/runtime/venv/bin/lingtai-wechat-bootstrap .secrets/wechat
+
+# If installed into an active venv or globally:
 lingtai-wechat-bootstrap .secrets/wechat
 ```
 
-This is the preferred first-time setup. It:
+This is the preferred first-time setup. It works on macOS, Linux, and WSL (automatically detects WSL and uses `cmd.exe /c start` or `wslview` to open the browser). It:
 
 1. Creates `.secrets/wechat/config.json` with defaults if missing.
 2. Renders the QR as an SVG inside a self-contained HTML page (with an admin-only warning banner) and opens it in your default browser.
@@ -111,8 +115,8 @@ Then run `system(action="refresh")` from the agent. The MCP subprocess starts, t
 ## Troubleshooting
 
 - **`LINGTAI_WECHAT_CONFIG env var not set`** — your `init.json` `mcp.wechat.env` entry is missing the `LINGTAI_WECHAT_CONFIG` key.
-- **`WeChat config not found`** — the path resolves but no file exists. Relative paths are resolved against `LINGTAI_AGENT_DIR`.
-- **`WeChat credentials not found`** — config exists but `credentials.json` doesn't. Run the QR-code login flow above.
+- **`WeChat config not found`** — the path resolves but no file exists. Relative paths are resolved against the **project root** (the parent of `.lingtai/`), not the agent directory. Make sure you ran `lingtai-wechat-bootstrap .secrets/wechat` from the project root.
+- **`WeChat credentials not found`** — config exists but `credentials.json` doesn't. Run the QR-code login flow above. Credentials are written next to `config.json`, so bootstrap and the MCP must agree on the config directory.
 - **`WeChat session expired`** event in agent inbox — re-run the QR-code login flow.
 - **`All connection attempts failed`** in stderr — usually a stale `base_url` in credentials. Re-run login.
 - **MCP server failed to start** — usually the `command` path in `init.json` doesn't have `lingtai_wechat` installed. Confirm with `<command> -m lingtai_wechat --help` from a shell.

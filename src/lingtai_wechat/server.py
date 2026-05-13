@@ -77,7 +77,17 @@ def load_config_and_credentials() -> tuple[dict, dict, Path]:
         )
     config_path = Path(config_path_raw).expanduser()
     if not config_path.is_absolute():
-        base = Path(os.environ.get("LINGTAI_AGENT_DIR", os.getcwd()))
+        # Resolve relative paths against the *project root*, not the agent
+        # working directory.  Agent dirs live at <project>/.lingtai/<agent>/,
+        # so the project root is two parents up from LINGTAI_AGENT_DIR.  This
+        # matches the convention used by lingtai-wechat-bootstrap, which writes
+        # config.json + credentials.json relative to the project root (e.g.
+        # .secrets/wechat/).  See GH #2.
+        agent_dir = os.environ.get("LINGTAI_AGENT_DIR")
+        if agent_dir:
+            base = Path(agent_dir).parent.parent  # .lingtai/<agent>/ -> project root
+        else:
+            base = Path.cwd()
         config_path = base / config_path
     if not config_path.is_file():
         raise FileNotFoundError(f"WeChat config not found: {config_path}")

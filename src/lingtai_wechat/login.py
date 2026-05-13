@@ -260,6 +260,45 @@ def _print_admin_qr_warning() -> None:
     print()
 
 
+def _open_browser_cross_platform(url: str) -> bool:
+    """Open *url* in the default browser, with WSL / wslview fallback.
+
+    Returns True if the browser was launched (or a launch was attempted).
+    See GH #3: ``webbrowser.open()`` is a no-op inside WSL, so we detect
+    the WSL kernel release string and fall back to ``cmd.exe /c start``
+    or ``wslview`` when available.
+    """
+    import platform
+    import shutil
+    import subprocess
+
+    release = platform.uname().release.lower()
+    if "microsoft" in release or "wsl" in release:
+        # WSL detected — try Windows-side browser first, then wslview.
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/c", "start", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except FileNotFoundError:
+            pass
+        wslview = shutil.which("wslview")
+        if wslview:
+            try:
+                subprocess.Popen(
+                    [wslview, url],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except Exception:
+                pass
+        # Fall through to webbrowser as last resort.
+    return webbrowser.open(url)
+
+
 def cli_browser_login(addon_dir: str | None = None) -> None:
     """First-time-setup browser QR bootstrap.
 
@@ -324,9 +363,10 @@ def cli_browser_login(addon_dir: str | None = None) -> None:
         encoding="utf-8",
     )
     try:
-        opened = webbrowser.open(html_path.as_uri())
+        uri = html_path.as_uri()
+        opened = _open_browser_cross_platform(uri)
     except Exception as e:
-        log.debug("webbrowser.open failed: %s", e)
+        log.debug("browser open failed: %s", e)
         opened = False
     if not opened:
         print(
